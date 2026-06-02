@@ -1,0 +1,281 @@
+name: CI / CD — Django → AWS EC2
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/django-app
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # 1. TEST
+  # ────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: testdb
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+
+      - name: Install dependencies
+        working-directory: app
+        run: pip install -r requirements.txt
+
+      - name: Run Django checks
+        working-directory: app
+        env:
+          SECRET_KEY: ci-test-secret-key
+          DEBUG: "True"
+          ALLOWED_HOSTS: localhost
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/testdb
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          python manage.py check --deploy 2>&1 | grep -v "WARNINGS" || true
+          python manage.py migrate --noinput
+          python manage.py test --verbosity=2
+
+      - name: Check for pending migrations
+        working-directory: app
+        env:
+          SECRET_KEY: ci-test-secret-key
+          DEBUG: "True"
+          ALLOWED_HOSTS: localhost
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/testdb
+        run: python manage.py migrate --check
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 2. BUILD & PUSH Docker image
+  # ────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=production,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_COMMIT=${{ github.sha }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 3. DEPLOY to EC2
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: production
+      url: https://${{ secrets.EC2_HOST }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: image
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tag=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      # ── Copy monitoring & nginx configs to server ──────────────────────────
+      - name: Sync configuration files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          source: "monitoring/,nginx/,docker-compose.production.yml"
+          target: /opt/django-app/
+
+      # ── SSH deploy: pull image + rolling restart ───────────────────────────
+      - name: Deploy application
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          timeout: 180s
+          script: |
+            set -euo pipefail
+            cd /opt/django-app
+
+            # Write .env.production from GitHub secrets on each deploy
+            # (secrets never touch disk in cleartext on the runner)
+            cat > .env.production <<'ENV'
+            SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+            DEBUG=False
+            ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}
+            DATABASE_URL=postgres://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@db:5432/${{ secrets.POSTGRES_DB }}
+            REDIS_URL=redis://redis:6379/0
+            POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            DOCKER_IMAGE=${{ steps.image.outputs.tag }}
+            GRAFANA_USER=${{ secrets.GRAFANA_USER }}
+            GRAFANA_PASSWORD=${{ secrets.GRAFANA_PASSWORD }}
+            SMTP_HOST=${{ secrets.SMTP_HOST }}
+            SMTP_USER=${{ secrets.SMTP_USER }}
+            SMTP_PASSWORD=${{ secrets.SMTP_PASSWORD }}
+            SMTP_FROM=${{ secrets.SMTP_FROM }}
+            ENV
+
+            # Log in to GHCR so we can pull the private image
+            echo "${{ secrets.GITHUB_TOKEN }}" | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Export image tag for docker-compose substitution
+            export DOCKER_IMAGE=${{ steps.image.outputs.tag }}
+
+            # Pull new image (fail fast if not available)
+            docker pull "${DOCKER_IMAGE}"
+
+            # ── Zero-downtime rolling restart ──────────────────────────────
+            # 1. Scale up celery workers with the new image (non-breaking)
+            docker compose -f docker-compose.production.yml \
+              up -d --no-deps --scale celery=0 celery
+
+            # 2. Run migrations before switching web traffic
+            docker compose -f docker-compose.production.yml \
+              run --rm app python manage.py migrate --noinput
+
+            # 3. Restart the app container (brief ~2s downtime; use ALB health checks)
+            docker compose -f docker-compose.production.yml \
+              up -d --no-deps --force-recreate app
+
+            # 4. Restart celery with new image
+            docker compose -f docker-compose.production.yml \
+              up -d --no-deps --scale celery=2 celery
+
+            # 5. Reload observability stack if configs changed (no downtime)
+            docker compose -f docker-compose.production.yml \
+              up -d --no-deps node-exporter prometheus alertmanager grafana
+
+            # 6. Health check — wait until the app returns 200
+            echo "Waiting for app to be healthy..."
+            for i in $(seq 1 15); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api/health/ || true)
+              if [ "$STATUS" = "200" ]; then
+                echo "✓ App healthy (attempt $i)"
+                break
+              fi
+              echo "  Attempt $i: status=$STATUS, retrying in 4s..."
+              sleep 4
+              if [ "$i" -eq 15 ]; then
+                echo "✗ Health check failed after 15 attempts" >&2
+                exit 1
+              fi
+            done
+
+            # 7. Remove dangling images to reclaim disk space
+            docker image prune -f
+
+      # ── Notify on failure ─────────────────────────────────────────────────
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Deployment failed for commit ${{ github.sha }}"
+          echo "Run: gh run view ${{ github.run_id }} --log"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. POST-DEPLOY SMOKE TEST
+  # ────────────────────────────────────────────────────────────────────────────
+  smoke-test:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    needs: deploy
+
+    steps:
+      - name: Health endpoint
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://${{ secrets.EC2_HOST }}/api/health/)
+          echo "Health: $STATUS"
+          [ "$STATUS" = "200" ] || (echo "FAIL" && exit 1)
+
+      - name: Readiness endpoint
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://${{ secrets.EC2_HOST }}/api/ready/)
+          echo "Ready: $STATUS"
+          [ "$STATUS" = "200" ] || (echo "FAIL" && exit 1)

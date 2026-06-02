@@ -1,0 +1,123 @@
+---
+- name: Configure Django application server
+  hosts: app_servers
+  become: true
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    # ── System hardening ────────────────────────────────────────────────────
+    - name: Update all packages
+      apt:
+        upgrade: dist
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install essential utilities
+      apt:
+        name:
+          - ufw
+          - fail2ban
+          - logrotate
+          - htop
+          - unzip
+          - awscli
+        state: present
+
+    # ── Firewall ─────────────────────────────────────────────────────────────
+    - name: Allow SSH
+      ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Allow HTTP
+      ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+
+    - name: Allow HTTPS
+      ufw:
+        rule: allow
+        port: "443"
+        proto: tcp
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        policy: deny
+
+    # ── Fail2ban ─────────────────────────────────────────────────────────────
+    - name: Configure fail2ban for SSH
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled  = true
+          port     = ssh
+          filter   = sshd
+          logpath  = /var/log/auth.log
+          maxretry = 5
+          bantime  = 3600
+          findtime = 600
+      notify: restart fail2ban
+
+    # ── Deploy application ────────────────────────────────────────────────────
+    - name: Create app directory
+      file:
+        path: /opt/{{ project_name }}
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Copy monitoring configuration
+      copy:
+        src: "{{ playbook_dir }}/../monitoring/"
+        dest: /opt/{{ project_name }}/monitoring/
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Copy nginx configuration
+      copy:
+        src: "{{ playbook_dir }}/../nginx/"
+        dest: /opt/{{ project_name }}/nginx/
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Copy docker-compose production file
+      copy:
+        src: "{{ playbook_dir }}/../docker-compose.production.yml"
+        dest: /opt/{{ project_name }}/docker-compose.production.yml
+        owner: ubuntu
+        group: ubuntu
+
+    # ── Environment file ──────────────────────────────────────────────────────
+    - name: Write production .env file
+      template:
+        src: templates/env.production.j2
+        dest: /opt/{{ project_name }}/.env.production
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+
+    # ── Log rotation ──────────────────────────────────────────────────────────
+    - name: Configure logrotate for Docker logs
+      copy:
+        dest: /etc/logrotate.d/docker-containers
+        content: |
+          /var/lib/docker/containers/*/*.log {
+            rotate 7
+            daily
+            compress
+            missingok
+            delaycompress
+            copytruncate
+          }
+
+  handlers:
+    - name: restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted

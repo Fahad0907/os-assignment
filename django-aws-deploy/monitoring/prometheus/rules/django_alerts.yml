@@ -1,0 +1,35 @@
+groups:
+  - name: django.app
+    interval: 30s
+    rules:
+      - alert: DjangoHighRequestLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(django_http_requests_latency_seconds_by_view_method_bucket[5m])
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Django p95 latency > 2s ({{ $labels.view }})"
+          description: "p95 latency is {{ $value | printf \"%.2f\" }}s on view {{ $labels.view }}."
+
+      - alert: DjangoHighErrorRate
+        expr: |
+          sum(rate(django_http_responses_total_by_status_view_method_total{status=~"5.."}[5m]))
+          / sum(rate(django_http_responses_total_by_status_view_method_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Django 5xx error rate > 5%"
+          description: "Error rate is {{ $value | printf \"%.2f\" }}% over the last 2 min."
+
+      - alert: DjangoAppDown
+        expr: absent(django_http_requests_total_by_method_total)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Django application is not responding"
+          description: "No Django metrics have been received for 2 min — app may be down."

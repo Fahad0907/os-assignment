@@ -1,0 +1,110 @@
+groups:
+  - name: node.critical
+    interval: 30s
+    rules:
+      # ── CPU ──────────────────────────────────────────────────────────────
+      - alert: HighCPUUsage
+        expr: |
+          100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value | printf \"%.1f\" }}% (threshold: 85%) for 5 min."
+
+      - alert: CriticalCPUUsage
+        expr: |
+          100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: CPU at {{ $value | printf \"%.1f\" }}% on {{ $labels.instance }}"
+          description: "CPU usage exceeds 95% for 2 min. Investigate immediately."
+
+      # ── Memory ───────────────────────────────────────────────────────────
+      - alert: HighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | printf \"%.1f\" }}% (threshold: 85%)."
+
+      - alert: CriticalMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: Memory at {{ $value | printf \"%.1f\" }}% on {{ $labels.instance }}"
+          description: "Memory usage exceeds 95% for 2 min. OOM risk."
+
+      # ── Disk ─────────────────────────────────────────────────────────────
+      - alert: DiskSpaceWarning
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs|squashfs"}
+           / node_filesystem_size_bytes{fstype!~"tmpfs|fuse.lxcfs|squashfs"}) * 100 < 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+          description: "Only {{ $value | printf \"%.1f\" }}% free (threshold: 20%)."
+
+      - alert: DiskSpaceCritical
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs|squashfs"}
+           / node_filesystem_size_bytes{fstype!~"tmpfs|fuse.lxcfs|squashfs"}) * 100 < 10
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CRITICAL: Disk almost full on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+          description: "Only {{ $value | printf \"%.1f\" }}% free. Disk fill will cause outage."
+
+      - alert: DiskIOSaturation
+        expr: |
+          rate(node_disk_io_time_seconds_total[5m]) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk I/O saturation on {{ $labels.instance }}"
+          description: "Disk {{ $labels.device }} is busy {{ $value | printf \"%.0f\" }}% of the time."
+
+      # ── Network ───────────────────────────────────────────────────────────
+      - alert: HighNetworkErrors
+        expr: |
+          rate(node_network_receive_errs_total[5m]) + rate(node_network_transmit_errs_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High network errors on {{ $labels.instance }}"
+          description: "{{ $value | printf \"%.1f\" }} errors/s on interface {{ $labels.device }}."
+
+      # ── Host availability ─────────────────────────────────────────────────
+      - alert: InstanceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Instance {{ $labels.instance }} is DOWN"
+          description: "Prometheus target {{ $labels.job }}/{{ $labels.instance }} has been unreachable for 1 min."
+
+      # ── System load ───────────────────────────────────────────────────────
+      - alert: HighSystemLoad
+        expr: |
+          node_load5 / count without(cpu, mode) (node_cpu_seconds_total{mode="idle"}) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High system load on {{ $labels.instance }}"
+          description: "5-min load average is {{ $value | printf \"%.2f\" }} times the number of CPUs."

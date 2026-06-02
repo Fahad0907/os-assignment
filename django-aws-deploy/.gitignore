@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+staticfiles/
+media/
+
+# Environment files — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Terraform
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+infra/terraform/*.tfplan
+infra/terraform/.terraform.lock.hcl
+infra/terraform/tfplan
+
+# SSL certs
+nginx/ssl/
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

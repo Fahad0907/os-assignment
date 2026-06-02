@@ -1,0 +1,78 @@
+global:
+  resolve_timeout: 5m
+
+  # ── SMTP settings ─────────────────────────────────────────────────────────
+  smtp_smarthost:    'smtp.gmail.com:587'     # or your SMTP server:port
+  smtp_from:         'alerts@yourdomain.com'
+  smtp_auth_username: 'alerts@yourdomain.com'
+  smtp_auth_password: 'YOUR_SMTP_APP_PASSWORD'  # use env substitution in production
+  smtp_require_tls:   true
+
+# ── Notification templates ─────────────────────────────────────────────────
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# ── Routing tree ───────────────────────────────────────────────────────────
+route:
+  receiver: default-email
+  group_by: ['alertname', 'severity', 'instance']
+  group_wait:      30s   # wait to batch alerts in the same group
+  group_interval:  5m    # send updates for ongoing alerts every 5m
+  repeat_interval: 4h    # re-notify if still firing after 4h
+
+  routes:
+    # Critical alerts get immediate notification and shorter repeat
+    - matchers:
+        - severity = critical
+      receiver: critical-email
+      group_wait:      10s
+      repeat_interval: 1h
+
+    # Warning alerts route to the default receiver
+    - matchers:
+        - severity = warning
+      receiver: default-email
+
+receivers:
+  - name: default-email
+    email_configs:
+      - to: 'oncall@yourdomain.com'
+        send_resolved: true
+        headers:
+          Subject: '[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }} — {{ .GroupLabels.instance }}'
+        html: |
+          {{ range .Alerts }}
+          <h3>{{ .Labels.alertname }}</h3>
+          <p><strong>Severity:</strong> {{ .Labels.severity }}</p>
+          <p><strong>Instance:</strong> {{ .Labels.instance }}</p>
+          <p><strong>Summary:</strong> {{ .Annotations.summary }}</p>
+          <p><strong>Description:</strong> {{ .Annotations.description }}</p>
+          <p><strong>Started:</strong> {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}</p>
+          <hr>
+          {{ end }}
+
+  - name: critical-email
+    email_configs:
+      - to: 'oncall@yourdomain.com, lead@yourdomain.com'
+        send_resolved: true
+        headers:
+          Subject: '🔴 CRITICAL: {{ .GroupLabels.alertname }} on {{ .GroupLabels.instance }}'
+        html: |
+          <h2 style="color:red">🔴 CRITICAL ALERT</h2>
+          {{ range .Alerts }}
+          <h3>{{ .Labels.alertname }}</h3>
+          <p><strong>Instance:</strong> {{ .Labels.instance }}</p>
+          <p><strong>Summary:</strong> {{ .Annotations.summary }}</p>
+          <p><strong>Description:</strong> {{ .Annotations.description }}</p>
+          <p><strong>Started:</strong> {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}</p>
+          <hr>
+          {{ end }}
+          <p><em>Investigate immediately — this may be causing user-facing downtime.</em></p>
+
+inhibit_rules:
+  # If a critical alert is firing, suppress warning alerts for the same instance
+  - source_matchers:
+      - severity = critical
+    target_matchers:
+      - severity = warning
+    equal: ['alertname', 'instance']
