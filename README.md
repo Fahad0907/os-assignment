@@ -53,21 +53,6 @@ terraform apply \
 
 Copy the `instance_public_ip` output — you'll need it below.
 
----
-
-## 2. Harden the server with Ansible
-
-```bash
-cd infra/ansible
-
-# Replace {{ EC2_PUBLIC_IP }} in inventory.ini with the Terraform output
-sed -i "s/{{ EC2_PUBLIC_IP }}/1.2.3.4/" inventory.ini
-
-# Run the playbook (installs Docker, UFW, fail2ban, copies configs)
-ansible-playbook -i inventory.ini playbook.yml
-```
-
----
 
 ## 3. Configure GitHub Secrets
 
